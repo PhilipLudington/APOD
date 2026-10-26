@@ -1,0 +1,245 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>APOD</title>
+<style>
+  :root {
+    --bg: #000;
+    --panel: #111317;
+    --text: #e6e6e6;
+    --muted: #9aa0a6;
+    --link: #8ab4f8;
+    --rule: #2a2d33;
+    --panel-width: min(32rem, 34vw);
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text);
+    font: 17px/1.55 -apple-system, BlinkMacSystemFont, "Helvetica Neue", sans-serif; }
+  body { display: grid; grid-template-columns: 1fr var(--panel-width); height: 100vh; overflow: hidden; }
+  body.no-panel { grid-template-columns: 1fr 0; }
+  body.no-panel #panel { display: none; }
+
+  #stage { position: relative; display: flex; align-items: center; justify-content: center;
+    min-width: 0; min-height: 0; height: 100vh; }
+  #stage img, #stage video { max-width: 100%; max-height: 100vh; object-fit: contain; display: block; }
+  #stage iframe { width: 100%; height: 100%; border: 0; }
+  #stage a { display: contents; }
+  #status { color: var(--muted); padding: 2rem; text-align: center; }
+
+  #panel { background: var(--panel); border-left: 1px solid var(--rule); overflow-y: auto;
+    padding: 1.75rem 1.75rem 2.5rem; min-width: 0; }
+  #date { color: var(--muted); font-size: .85rem; letter-spacing: .08em; text-transform: uppercase; margin: 0 0 .4rem; }
+  h1 { font-size: 1.6rem; line-height: 1.25; margin: 0 0 1.1rem; }
+  #explanation p { margin: 0 0 1em; }
+  a { color: var(--link); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  #credit { color: var(--muted); font-size: .9rem; border-top: 1px solid var(--rule); padding-top: .9rem; margin-top: 1.2rem; }
+  #credit p { margin: 0 0 .3rem; }
+
+  nav { display: flex; gap: .5rem; margin: 1.4rem 0 .8rem; flex-wrap: wrap; }
+  button { font: inherit; font-size: .9rem; color: var(--text); background: #1f2329; border: 1px solid var(--rule);
+    border-radius: 6px; padding: .35rem .8rem; cursor: pointer; }
+  button:hover:not(:disabled) { background: #2a2f37; }
+  button:disabled { opacity: .35; cursor: default; }
+  #keys { color: var(--muted); font-size: .8rem; }
+  kbd { font: inherit; border: 1px solid var(--rule); border-radius: 4px; padding: 0 .3rem; }
+
+  @media (max-width: 800px) {
+    body { display: block; overflow: auto; height: auto; }
+    #stage { height: 70vh; }
+    #stage img, #stage video { max-height: 70vh; }
+    #panel { border-left: 0; border-top: 1px solid var(--rule); }
+  }
+</style>
+</head>
+<body>
+<main id="stage"><div id="status">Loading today's picture…</div></main>
+<aside id="panel">
+  <p id="date"></p>
+  <h1 id="title"></h1>
+  <div id="explanation"></div>
+  <div id="credit"></div>
+  <nav>
+    <button id="prev" title="Previous day (←)">← Previous</button>
+    <button id="today" title="Today (T)">Today</button>
+    <button id="next" title="Next day (→)">Next →</button>
+    <button id="source" title="Open on NASA's site">NASA page</button>
+  </nav>
+  <p id="keys"><kbd>←</kbd> <kbd>→</kbd> change day · <kbd>T</kbd> today · <kbd>E</kbd> hide text · <kbd>F</kbd> full screen</p>
+</aside>
+<script>
+// Reads NASA's own WordPress feed for the APOD category. api.nasa.gov's APOD
+// endpoint stopped returning real pictures after the site moved to science.nasa.gov.
+const FEED = "https://science.nasa.gov/wp-json/wp/v2/image-article";
+const CATEGORY = 22766;
+const FIELDS = "date,link,title,content";
+
+const $ = (id) => document.getElementById(id);
+let current = null;       // the post on screen
+let showingLatest = true; // true when no date is pinned in the URL
+
+async function query(params) {
+  const url = new URL(FEED);
+  url.search = new URLSearchParams({ categories: CATEGORY, per_page: 1, _fields: FIELDS, ...params });
+  const res = await fetch(url);
+  if (!res.ok) throw new Error(`NASA feed answered ${res.status}`);
+  const posts = await res.json();
+  return posts[0] || null;
+}
+
+// Post dates are in the site's own time zone, so day boundaries are plain strings.
+const dayAfter = (day) => {
+  const d = new Date(day + "T12:00:00Z");
+  d.setUTCDate(d.getUTCDate() + 1);
+  return d.toISOString().slice(0, 10);
+};
+const onOrBefore = (day) => query({ before: dayAfter(day) + "T00:00:00" });
+const after = (day) => query({ after: day + "T23:59:59", order: "asc" });
+
+function parse(post) {
+  const doc = new DOMParser().parseFromString(post.content.rendered, "text/html");
+  const hero = doc.querySelector(".media-detail-hero__media") || doc.body;
+  const media = hero.querySelector("video, iframe, img");
+  const description = doc.querySelector(".media-detail-hero__description");
+  if (description) {
+    const label = description.querySelector("strong");
+    if (label && /explanation/i.test(label.textContent)) label.remove();
+  }
+  const credits = [...doc.querySelectorAll(".media-detail-hero__meta-row")]
+    .filter((row) => /credit/i.test(row.querySelector("th")?.textContent || ""))
+    .map((row) => row.querySelector("td").innerHTML.trim());
+  const title = new DOMParser().parseFromString(post.title.rendered, "text/html").body.textContent
+    .replace(/^APOD:\s*/, "").replace(/^\d{4} \w+ \d{1,2}\s*[–-]\s*/, "");
+  return { day: post.date.slice(0, 10), title, media, description, credits, link: post.link };
+}
+
+function renderMedia(media, link) {
+  const stage = $("stage");
+  stage.replaceChildren();
+  if (!media) {
+    stage.innerHTML = `<div id="status">No picture today. <a href="${link}" target="_blank">Open NASA's page</a></div>`;
+    return;
+  }
+  if (media.tagName === "IMG") {
+    const img = new Image();
+    img.src = media.getAttribute("src");
+    img.alt = media.getAttribute("alt") || "";
+    const a = document.createElement("a");
+    a.href = img.src.split("?")[0];
+    a.target = "_blank";
+    a.title = "Open full size";
+    a.append(img);
+    stage.append(a);
+  } else if (media.tagName === "VIDEO") {
+    const video = document.createElement("video");
+    video.src = media.querySelector("source")?.getAttribute("src") || media.getAttribute("src");
+    Object.assign(video, { controls: true, autoplay: true, muted: true, loop: true, playsInline: true });
+    stage.append(video);
+  } else {
+    const frame = document.createElement("iframe");
+    frame.src = media.getAttribute("src");
+    frame.allow = "autoplay; fullscreen; picture-in-picture";
+    frame.allowFullscreen = true;
+    stage.append(frame);
+  }
+}
+
+function render(post) {
+  const p = parse(post);
+  current = p;
+  renderMedia(p.media, p.link);
+  const when = new Date(p.day + "T12:00:00Z");
+  $("date").textContent = when.toLocaleDateString(undefined,
+    { weekday: "long", year: "numeric", month: "long", day: "numeric", timeZone: "UTC" });
+  $("title").textContent = p.title;
+  document.title = `APOD · ${p.title}`;
+  const explanation = $("explanation");
+  explanation.replaceChildren();
+  if (p.description) {
+    const para = document.createElement("p");
+    para.innerHTML = p.description.innerHTML.trim();
+    explanation.append(para);
+  }
+  explanation.querySelectorAll("a").forEach((a) => { a.target = "_blank"; a.rel = "noopener"; });
+  $("credit").innerHTML = p.credits.map((c) => `<p>Credit: ${c}</p>`).join("");
+  $("credit").querySelectorAll("a").forEach((a) => { a.target = "_blank"; a.rel = "noopener"; });
+  $("next").disabled = showingLatest;
+  $("panel").scrollTop = 0;
+}
+
+let retryDelay = 5000;
+let loadSeq = 0; // ignores answers to loads that a newer navigation replaced
+async function load(day) {
+  const seq = ++loadSeq;
+  showingLatest = !day;
+  try {
+    const post = day ? await onOrBefore(day) : await query({});
+    if (seq !== loadSeq) return;
+    if (!post) throw new Error("NASA's feed returned no picture");
+    retryDelay = 5000;
+    render(post);
+  } catch (err) {
+    if (seq !== loadSeq) return;
+    // At login the network is often not up yet; keep retrying quietly.
+    $("stage").innerHTML = `<div id="status">Waiting for NASA… (${err.message})</div>`;
+    setTimeout(() => { if (seq === loadSeq) load(day); }, retryDelay);
+    retryDelay = Math.min(retryDelay * 2, 300000);
+  }
+}
+
+// A pinned day lives in the URL hash, so the back button and reloads keep it.
+function go(day) {
+  if (day && location.hash.slice(1) !== day) { location.hash = day; return; } // hashchange loads it
+  if (!day) history.replaceState(null, "", location.pathname);
+  load(day);
+}
+
+async function step(direction) {
+  if (!current) return;
+  if (direction < 0) {
+    const d = new Date(current.day + "T12:00:00Z");
+    d.setUTCDate(d.getUTCDate() - 1);
+    const post = await onOrBefore(d.toISOString().slice(0, 10));
+    if (post) go(post.date.slice(0, 10));
+  } else if (!showingLatest) {
+    const post = await after(current.day);
+    const latest = await query({});
+    if (!post || post.date.slice(0, 10) === latest.date.slice(0, 10)) go(null);
+    else go(post.date.slice(0, 10));
+  }
+}
+
+$("prev").onclick = () => step(-1);
+$("next").onclick = () => step(1);
+$("today").onclick = () => go(null);
+$("source").onclick = () => current && window.open(current.link, "_blank");
+
+document.addEventListener("keydown", (e) => {
+  if (e.metaKey || e.ctrlKey || e.altKey) return;
+  if (e.key === "ArrowLeft") step(-1);
+  else if (e.key === "ArrowRight") step(1);
+  else if (e.key === "t" || e.key === "T") go(null);
+  else if (e.key === "e" || e.key === "E") document.body.classList.toggle("no-panel");
+  else if (e.key === "f" || e.key === "F") {
+    if (document.fullscreenElement) document.exitFullscreen();
+    else document.documentElement.requestFullscreen?.();
+  }
+});
+
+// When left open across midnight, pick up the new picture once the window is looked at again.
+function refreshIfStale() {
+  if (!showingLatest || !current) return;
+  query({}).then((post) => { if (post && post.date.slice(0, 10) !== current.day) render(post); }).catch(() => {});
+}
+document.addEventListener("visibilitychange", () => { if (!document.hidden) refreshIfStale(); });
+window.addEventListener("focus", refreshIfStale);
+setInterval(refreshIfStale, 60 * 60 * 1000);
+
+window.addEventListener("hashchange", () => load(location.hash.slice(1) || null));
+
+load(location.hash.slice(1) || null);
+</script>
+</body>
+</html>
