@@ -24,7 +24,6 @@ cat > "$PLIST" <<EOF
   <array>
     <string>/bin/zsh</string>
     <string>$HERE/open-apod.sh</string>
-    <string>--at-login</string>
   </array>
   <key>RunAtLoad</key><true/>
   <key>StandardErrorPath</key><string>/tmp/$LABEL.err</string>
